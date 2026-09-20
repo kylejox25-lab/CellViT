@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rxrx3-mae"
+version = "0.1.0"
+description = "RxRx3-core six-channel masked image modeling"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+    "pyarrow>=14",
+    "Pillow>=10",
+    "mosaicml-streaming==0.13.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.scripts]
+rxrx3-convert = "rxrx3_mae.data.convert:main"
+rxrx3-check-loader = "rxrx3_mae.data.check_loader:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

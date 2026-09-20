@@ -1,0 +1,28 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ipynb_checkpoints/
+.venv/
+*.egg-info/
+outputs/
+*.incomplete/
+
+# Local datasets, converted MDS shards, and training artifacts.
+/data/
+/mds/
+/cache/
+/checkpoints/
+/runs/
+/logs/
+*.parquet
+*.jp2
+*.mds
+*.ckpt
+*.pt
+*.pth
+*.safetensors
+
+# Machine-specific configuration and credentials.
+.env
+.env.*
+!.env.example

@@ -1,0 +1,23 @@
+name: rxrx3-mae
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+dependencies:
+  - python=3.11
+  # Last PyTorch release with official Conda CUDA packages.
+  - pytorch=2.5.1
+  - pytorch-cuda=12.1
+  - numpy=1.26
+  - pyarrow>=14,<20
+  - pandas>=2.2,<3
+  - pillow>=10,<12
+  - matplotlib>=3.8,<4
+  - jupyterlab>=4,<5
+  - ipykernel>=6,<7
+  - nbformat>=5,<6
+  - pytest>=8,<9
+  - pip
+  - setuptools
+  - pip:
+      - mosaicml-streaming==0.13.0
