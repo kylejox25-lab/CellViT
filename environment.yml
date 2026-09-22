@@ -2,12 +2,17 @@ name: cellvit
 channels:
   - pytorch
   - nvidia
+  - defaults
   - conda-forge
 dependencies:
   - python=3.11
   # Last PyTorch release with official Conda CUDA packages.
   - pytorch=2.5.1
+  - torchvision=0.20.1
   - pytorch-cuda=12.1
+  # PyTorch 2.5.1 fails to import with MKL 2024.1+ (iJIT_NotifyEvent).
+  - mkl=2023.1.0
+  - intel-openmp=2023.1.0
   - numpy=1.26
   - pyarrow>=14,<20
   - pandas>=2.2,<3

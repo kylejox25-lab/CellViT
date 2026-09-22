@@ -13,13 +13,13 @@
 
 ## Conda 环境
 
-在服务器的项目目录中创建环境（目标为单张 RTX 3090；PyTorch 2.5.1 + CUDA 12.1）：
+在服务器的项目目录中直接创建环境（目标为单张 RTX 3090；PyTorch 2.5.1 + CUDA 12.1；MKL 固定为兼容版本）：
 
 ```bash
 conda env create -f environment.yml
 conda activate cellvit
 python -m pip install -e . --no-deps
-python -c "import torch, streaming; print(torch.__version__, torch.cuda.is_available(), streaming.__version__)"
+python -c "import torch, torchvision, streaming; print(torch.__version__, torchvision.__version__, torch.cuda.is_available(), streaming.__version__)"
 python -m pytest -q
 ```
 
