@@ -1,4 +1,4 @@
-name: rxrx3-mae
+name: cellvit
 channels:
   - pytorch
   - nvidia

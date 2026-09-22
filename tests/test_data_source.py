@@ -5,8 +5,8 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from rxrx3_mae.data.convert import convert_dataset
-from rxrx3_mae.data.source import iter_wells, load_metadata, make_plate_splits, parse_image_key
+from cellvit.data.convert import convert_dataset
+from cellvit.data.source import iter_wells, load_metadata, make_plate_splits, parse_image_key
 
 
 def write_shard(path: Path, entries: list[tuple[str, bytes]]) -> None:

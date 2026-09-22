@@ -1,8 +1,8 @@
-# RxRx3-core 六通道细胞图像的掩码表征学习
+# CellViT：RxRx3-core 六通道细胞图像基座模型
 
 > 状态：研究设计 v0.3。训练资源为服务器单张 RTX 3090（24 GB）；服务器已可读取 RxRx3-core，连续训练时间暂不设上限。本地数据目录 `E:\CellPainting\rxrx3_core` 只读；服务器上的数据同样按只读使用。代码、索引、缓存、检查点和结果写在项目目录或服务器另设的可写目录。
 
-实施进度：Data loader 第一阶段已写入 `src/rxrx3_mae/data/`，支持原始 Parquet→孔位级 MDS 转换和 Streaming 读取；已补 [Conda 环境](environment.yml) 和 [数据检查 notebook](notebooks/01_explore_rxrx3_core.ipynb)，使用方法见 [README.md](README.md)。本地已验证原始数据键、图像解码及 notebook，服务器上的真实 MDS 读回尚待执行。模型训练阶段尚未开始。
+实施进度：Data loader 第一阶段已写入 `src/cellvit/data/`，支持原始 Parquet→孔位级 MDS 转换和 Streaming 读取；已补 [Conda 环境](environment.yml) 和 [数据检查 notebook](notebooks/01_explore_rxrx3_core.ipynb)，使用方法见 [README.md](README.md)。本地已验证原始数据键、图像解码及 notebook，服务器上的真实 MDS 读回尚待执行。模型训练阶段尚未开始。
 
 ## 1. 研究目标与问题
 

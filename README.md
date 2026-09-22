@@ -1,4 +1,4 @@
-# RxRx3-core MAE
+# CellViT
 
 当前阶段仅实现数据读取。原始 RxRx3-core 目录保持只读；转换后的 MDS、缓存与日志放在新的可写目录。
 
@@ -17,7 +17,7 @@
 
 ```bash
 conda env create -f environment.yml
-conda activate rxrx3-mae
+conda activate cellvit
 python -m pip install -e . --no-deps
 python -c "import torch, streaming; print(torch.__version__, torch.cuda.is_available(), streaming.__version__)"
 python -m pytest -q
@@ -28,11 +28,11 @@ python -m pytest -q
 要在 Jupyter 中使用该环境：
 
 ```bash
-python -m ipykernel install --user --name rxrx3-mae --display-name "Python (rxrx3-mae)"
+python -m ipykernel install --user --name cellvit --display-name "Python (cellvit)"
 jupyter lab
 ```
 
-打开 [数据检查 notebook](notebooks/01_explore_rxrx3_core.ipynb)，选择 `Python (rxrx3-mae)` 内核。Notebook 默认读取本机的 `E:\CellPainting\rxrx3_core`；在服务器上设置 `RXRX3_CORE_ROOT` 环境变量，或直接修改 notebook 第一段配置中的路径。
+打开 [数据检查 notebook](notebooks/01_explore_rxrx3_core.ipynb)，选择 `Python (cellvit)` 内核。Notebook 默认读取本机的 `E:\CellPainting\rxrx3_core`；在服务器上设置 `RXRX3_CORE_ROOT` 环境变量，或直接修改 notebook 第一段配置中的路径。
 
 Linux 服务器示例：
 
@@ -48,19 +48,19 @@ jupyter lab notebooks/01_explore_rxrx3_core.ipynb
 先做小样本转换（源目录和输出目录替换为服务器实际路径）：
 
 ```bash
-rxrx3-convert --source /path/to/rxrx3_core --output /path/to/rxrx3_smoke --max-wells 12
+cellvit-convert --source /path/to/rxrx3_core --output /path/to/rxrx3_smoke --max-wells 12
 ```
 
 检查冒烟结果后，转换全部数据至另一个**不存在**的输出目录：
 
 ```bash
-rxrx3-convert --source /path/to/rxrx3_core --output /path/to/rxrx3_mds
+cellvit-convert --source /path/to/rxrx3_core --output /path/to/rxrx3_mds
 ```
 
 先查看小样本 `manifest.json` 中哪个 split 有样本，再对该 split 运行真实 MDS 读取检查：
 
 ```bash
-rxrx3-check-loader --mds-root /path/to/rxrx3_smoke --split test --batch-size 2
+cellvit-check-loader --mds-root /path/to/rxrx3_smoke --split test --batch-size 2
 ```
 
 上面的 `test` 只是示例；小样本的前几个孔位可能属于任意一个 split。
@@ -70,7 +70,7 @@ rxrx3-check-loader --mds-root /path/to/rxrx3_smoke --split test --batch-size 2
 读取示例：
 
 ```python
-from rxrx3_mae.data.streaming_dataset import make_dataloader
+from cellvit.data.streaming_dataset import make_dataloader
 
 loader = make_dataloader(mds_root="/path/to/rxrx3_mds", split="train", batch_size=8)
 batch = next(iter(loader))

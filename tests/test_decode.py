@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from rxrx3_mae.data.decode import decode_well
+from cellvit.data.decode import decode_well
 
 
 def test_decode_preserves_channel_and_crop_order() -> None:
