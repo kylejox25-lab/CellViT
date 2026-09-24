@@ -7,8 +7,9 @@ channels:
 dependencies:
   - python=3.11
   # Last PyTorch release with official Conda CUDA packages.
-  - pytorch=2.5.1
-  - torchvision=0.20.1
+  - pytorch=2.5.1=*cuda12.1*
+  - torchvision=0.20.1=*cu121*
+  - pytorch-mutex=1.0=cuda
   - pytorch-cuda=12.1
   # PyTorch 2.5.1 fails to import with MKL 2024.1+ (iJIT_NotifyEvent).
   - mkl=2023.1.0

@@ -19,11 +19,11 @@
 conda env create -f environment.yml
 conda activate cellvit
 python -m pip install -e . --no-deps
-python -c "import torch, torchvision, streaming; print(torch.__version__, torchvision.__version__, torch.cuda.is_available(), streaming.__version__)"
+python -c "import torch, torchvision, streaming; print(torch.__version__, torchvision.__version__, torch.version.cuda, torch.cuda.is_available(), streaming.__version__)"
 python -m pytest -q
 ```
 
-如果环境已经存在，先运行 `conda env update -f environment.yml --prune`，再执行安装项目的命令。`torch.cuda.is_available()` 在 3090 服务器上应为 `True`；如果为 `False`，先检查驱动和服务器的 CUDA 环境，不要开始训练。
+如果环境已经存在，先运行 `conda env update -f environment.yml --prune`，再执行安装项目的命令。环境应使用 `pytorch 2.5.1` 的 CUDA 12.1 构建和 `torchvision 0.20.1` 的 cu121 构建；CPU 版 PyTorch 与 cu121 版 torchvision 混装会在导入时失败。`torch.version.cuda` 应为 `12.1`，`torch.cuda.is_available()` 在 3090 服务器上应为 `True`。
 
 要在 Jupyter 中使用该环境：
 
