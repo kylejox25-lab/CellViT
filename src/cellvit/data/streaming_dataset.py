@@ -12,7 +12,7 @@ from .decode import decode_well
 
 
 class RxRx3StreamingDataset(StreamingDataset):
-    """Return four channel-aligned crops and metadata per well.
+    """Return one full channel-aligned image and metadata per well.
 
     ``batch_size`` must match StreamingDataLoader's per-device batch size so
     Streaming can partition and resume samples deterministically.

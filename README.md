@@ -6,7 +6,7 @@
 
 `35 个原始 Parquet 分片 → 每孔 6 个 JP2 字节 → MDS train/val/test → StreamingDataLoader`
 
-转换器保留 JP2 压缩字节，不把图像预先展开成大数组；每个 MDS 样本对应一个孔位。读取器解码后返回 `image`：`[batch, 4, 6, 256, 256]`，数值为 `float32 [0,1]`。四块裁剪顺序为左上、右上、左下、右下。训练阶段选择其中一块的策略留给训练循环决定，以保证断点续训时不产生隐藏的随机裁剪状态。
+转换器保留 JP2 压缩字节，不把图像预先展开成大数组；每个 MDS 样本对应一个孔位。读取器解码后返回完整孔位图像 `image`：`[batch, 6, 512, 512]`，数值为 `float32 [0,1]`。不在读取阶段裁切。16×16 图像 patch 是后续从零训练 ViT 的配置，届时每孔对应 1024 个空间 token；尺寸定义见 `src/cellvit/image_config.py`。目前数据读取器只返回完整图像，模型与训练代码尚未实现。
 
 数据按每个实验内的整块孔板分成 train/val/test。`manifest.json` 记录数量、源分片大小、元数据哈希和转换是否完整；`plate_splits.json` 固定划分。`--max-wells` 只用于小样本冒烟测试，产生的 `complete=false` 数据不能用于正式训练。
 常规 `make_dataloader` 会拒绝读取不完整转换；检查命令仅为冒烟测试允许读取。
@@ -75,7 +75,7 @@ from cellvit.data.streaming_dataset import make_dataloader
 loader = make_dataloader(mds_root="/path/to/rxrx3_mds", split="train", batch_size=8)
 batch = next(iter(loader))
 print(batch["image"].shape, batch["well_id"][:2])
-# torch.Size([8, 4, 6, 256, 256])
+# torch.Size([8, 6, 512, 512])
 ```
 
 `make_dataloader` 使用 MosaicML 的 `StreamingDataLoader`，训练检查点应同时保存其 `state_dict()`；恢复时调用 `load_state_dict()`。DataLoader 与 StreamingDataset 使用相同的每卡 batch size。

@@ -7,7 +7,7 @@ from PIL import Image
 from cellvit.data.decode import decode_well
 
 
-def test_decode_preserves_channel_and_crop_order() -> None:
+def test_decode_preserves_full_image_and_channel_order() -> None:
     sample = {}
     for channel in range(1, 7):
         image = np.zeros((512, 512), dtype=np.uint8)
@@ -19,8 +19,12 @@ def test_decode_preserves_channel_and_crop_order() -> None:
         Image.fromarray(image).save(buffer, format="PNG")
         sample[f"ch{channel}"] = buffer.getvalue()
 
-    crops = decode_well(sample)
-    assert crops.shape == (4, 6, 256, 256)
-    assert crops.dtype == np.float32
-    assert crops[:, 0, 0, 0] == pytest.approx([1 / 255, 11 / 255, 21 / 255, 31 / 255])
-    assert crops[0, :, 0, 0] == pytest.approx([i / 255 for i in range(1, 7)])
+    decoded = decode_well(sample)
+    assert decoded.shape == (6, 512, 512)
+    assert decoded.dtype == np.float32
+    assert decoded[:, 0, 0] == pytest.approx([i / 255 for i in range(1, 7)])
+    assert decoded[0, 255, 255] == pytest.approx(1 / 255)
+    assert decoded[0, 255, 256] == pytest.approx(11 / 255)
+    assert decoded[0, 256, 255] == pytest.approx(21 / 255)
+    assert decoded[0, 256, 256] == pytest.approx(31 / 255)
+    assert decoded[5, 511, 511] == pytest.approx(36 / 255)

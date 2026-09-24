@@ -6,6 +6,8 @@ import argparse
 import json
 from pathlib import Path
 
+from cellvit.image_config import IMAGE_CHANNELS, IMAGE_SIZE
+
 from .streaming_dataset import make_dataloader
 
 
@@ -29,7 +31,7 @@ def main() -> None:
     )
     batch = next(iter(loader))
     image = batch["image"]
-    if image.ndim != 5 or tuple(image.shape[1:]) != (4, 6, 256, 256):
+    if image.ndim != 4 or tuple(image.shape[1:]) != (IMAGE_CHANNELS, IMAGE_SIZE, IMAGE_SIZE):
         raise ValueError(f"Unexpected image batch shape: {tuple(image.shape)}")
     if not image.isfinite().all() or image.min() < 0 or image.max() > 1:
         raise ValueError("Images have non-finite or out-of-range values")
