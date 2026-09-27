@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "CellViT foundation model for six-channel Cell Painting images"
 requires-python = ">=3.10"
 dependencies = [
+    "torch>=2.5,<2.6",
     "numpy>=1.24",
     "pyarrow>=14",
     "Pillow>=10",
@@ -20,6 +21,8 @@ dev = ["pytest>=8"]
 [project.scripts]
 cellvit-convert = "cellvit.data.convert:main"
 cellvit-check-loader = "cellvit.data.check_loader:main"
+cellvit-train = "cellvit.train.mae:main"
+cellvit-embed = "cellvit.infer:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

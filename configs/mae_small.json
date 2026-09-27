@@ -1,0 +1,14 @@
+{
+  "image_size": 512,
+  "patch_size": 16,
+  "in_channels": 6,
+  "encoder_dim": 384,
+  "encoder_depth": 12,
+  "encoder_heads": 6,
+  "decoder_dim": 192,
+  "decoder_depth": 4,
+  "decoder_heads": 6,
+  "mlp_ratio": 4.0,
+  "mask_ratio": 0.75,
+  "norm_pix_loss": true
+}
