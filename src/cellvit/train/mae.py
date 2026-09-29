@@ -17,7 +17,9 @@ import torch
 from streaming import StreamingDataLoader
 
 from cellvit.data.streaming_dataset import make_dataloader
+from cellvit.evaluate import evaluate_reconstruction
 from cellvit.models import MAEConfig, MaskedAutoencoder
+from cellvit.train.optimization import optimizer_step
 
 
 @dataclass(frozen=True)
@@ -49,7 +51,7 @@ class TrainConfig:
 
 
 def learning_rate(step: int, total_steps: int, peak: float, warmup_fraction: float) -> float:
-    """Linear warmup followed by cosine decay, indexed by optimizer step."""
+    """Linear warmup then cosine decay, indexed by accumulated update attempt."""
     warmup = int(total_steps * warmup_fraction)
     if warmup and step < warmup:
         return peak * (step + 1) / warmup
@@ -87,6 +89,9 @@ def _checkpoint_state(
     global_step: int,
     global_batch: int,
     total_steps: int,
+    update_attempts: int,
+    consecutive_overflows: int,
+    best_reconstruction_loss: float,
 ) -> dict:
     return {
         "format": "cellvit-spatial-mae-v1",
@@ -102,6 +107,9 @@ def _checkpoint_state(
         "global_step": global_step,
         "global_batch": global_batch,
         "total_steps": total_steps,
+        "update_attempts": update_attempts,
+        "consecutive_overflows": consecutive_overflows,
+        "best_reconstruction_loss": best_reconstruction_loss,
         "python_rng": random.getstate(),
         "numpy_rng": np.random.get_state(),
         "torch_rng": torch.get_rng_state(),
@@ -113,23 +121,9 @@ def _checkpoint_state(
 def validate(
     model: MaskedAutoencoder, loader: StreamingDataLoader,
     device: torch.device, seed: int, amp: bool
-) -> float:
-    """Monitor reconstruction only; biological retrieval remains the selection metric."""
-    model.eval()
-    weighted_loss = 0.0
-    wells = 0
-    for index, batch in enumerate(loader):
-        image = batch["image"].to(device, non_blocking=True)
-        generator = torch.Generator(device=device.type).manual_seed(seed + index)
-        with torch.autocast(
-            device_type=device.type, dtype=torch.float16, enabled=amp and device.type == "cuda"
-        ):
-            loss = model(image, generator=generator)["loss"]
-        weighted_loss += float(loss) * len(image)
-        wells += len(image)
-    if wells == 0:
-        raise RuntimeError("Validation loader produced no wells")
-    return weighted_loss / wells
+) -> dict:
+    """Evaluate the masked reconstruction objective using fixed validation masks."""
+    return evaluate_reconstruction(model, loader, device, seed=seed, amp=amp)
 
 
 def train(
@@ -191,6 +185,8 @@ def train(
     scaler = torch.amp.GradScaler("cuda", enabled=run.amp and device.type == "cuda")
     checkpoint_path = output / "latest.pt"
     epoch = batch_in_epoch = global_step = global_batch = 0
+    update_attempts = consecutive_overflows = 0
+    best_reconstruction_loss = math.inf
 
     if resume is not None:
         state = torch.load(resume, map_location="cpu", weights_only=False)
@@ -208,6 +204,10 @@ def train(
         batch_in_epoch = state["batch_in_epoch"]
         global_step = state["global_step"]
         global_batch = state["global_batch"]
+        # Old checkpoints predate AMP skip handling and reconstruction selection.
+        update_attempts = state.get("update_attempts", global_step)
+        consecutive_overflows = state.get("consecutive_overflows", 0)
+        best_reconstruction_loss = state.get("best_reconstruction_loss", math.inf)
         random.setstate(state["python_rng"])
         np.random.set_state(state["numpy_rng"])
         torch.set_rng_state(state["torch_rng"])
@@ -223,18 +223,21 @@ def train(
             }, indent=2), encoding="utf-8",
         )
 
-    if global_step >= total_steps or (max_steps is not None and global_step >= max_steps):
+    if epoch >= run.epochs or (max_steps is not None and global_step >= max_steps):
         return resume if resume is not None else checkpoint_path
     optimizer.zero_grad(set_to_none=True)
     group_wells = 0
     group_loss = 0.0
     log_path = output / "metrics.jsonl"
+    # Scale each micro-batch before backward; correct partial groups at update.
+    accumulation_wells = run.accumulation_steps * run.batch_size
 
     for current_epoch in range(epoch, run.epochs):
         model.train()
         epoch_started = time.perf_counter()
         epoch_wells = 0
-        for batch_index, batch in enumerate(train_loader, start=batch_in_epoch):
+        epoch_batches = () if batch_in_epoch == batches_per_epoch else train_loader
+        for batch_index, batch in enumerate(epoch_batches, start=batch_in_epoch):
             image = batch["image"].to(device, non_blocking=True)
             generator = torch.Generator(device=device.type).manual_seed(run.seed + global_batch)
             with torch.autocast(
@@ -243,8 +246,10 @@ def train(
             ):
                 loss = model(image, generator=generator)["loss"]
             if not torch.isfinite(loss):
-                raise FloatingPointError(f"Non-finite training loss at batch {global_batch}")
-            scaler.scale(loss * len(image)).backward()
+                raise FloatingPointError(
+                    f"Non-finite training loss at batch {global_batch}, wells={batch['well_id']}"
+                )
+            scaler.scale(loss * (len(image) / accumulation_wells)).backward()
             group_wells += len(image)
             group_loss += float(loss.detach()) * len(image)
             epoch_wells += len(image)
@@ -253,24 +258,27 @@ def train(
             if batch_in_epoch % run.accumulation_steps and batch_in_epoch < batches_per_epoch:
                 continue
 
-            scaler.unscale_(optimizer)
-            for parameter in model.parameters():
-                if parameter.grad is not None:
-                    parameter.grad.div_(group_wells)
-            torch.nn.utils.clip_grad_norm_(
-                model.parameters(), max_norm=1.0, error_if_nonfinite=True
-            )
             rate = learning_rate(
-                global_step, total_steps, run.learning_rate, run.warmup_fraction
+                update_attempts, total_steps, run.learning_rate, run.warmup_fraction
             )
             for group in optimizer.param_groups:
                 group["lr"] = rate
-            scaler.step(optimizer)
-            scaler.update()
+            scale_before = scaler.get_scale()
+            updated, grad_norm = optimizer_step(
+                optimizer, scaler, gradient_multiplier=accumulation_wells / group_wells,
+            )
             optimizer.zero_grad(set_to_none=True)
-            global_step += 1
+            update_attempts += 1
+            global_step += int(updated)
+            consecutive_overflows = 0 if updated else consecutive_overflows + 1
             record = {
                 "step": global_step, "epoch": current_epoch,
+                "update_attempts": update_attempts,
+                "skipped_updates": update_attempts - global_step,
+                "amp_overflow": not updated,
+                "grad_norm": grad_norm,
+                "loss_scale_before": scale_before,
+                "loss_scale": scaler.get_scale(),
                 "batch_in_epoch": batch_in_epoch,
                 "train_loss": group_loss / group_wells,
                 "learning_rate": rate,
@@ -281,13 +289,14 @@ def train(
             }
             with log_path.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(record) + "\n")
-            if global_step % run.log_every == 0:
+            if not updated or update_attempts % run.log_every == 0:
                 print(json.dumps(record), flush=True)
             group_wells = 0
             group_loss = 0.0
 
             stop_now = max_steps is not None and global_step >= max_steps
-            if global_step % run.checkpoint_every == 0 or (
+            repeated_overflow = consecutive_overflows >= 20
+            if repeated_overflow or update_attempts % run.checkpoint_every == 0 or (
                 stop_now and batch_in_epoch < batches_per_epoch
             ):
                 _save_checkpoint(checkpoint_path, _checkpoint_state(
@@ -295,26 +304,46 @@ def train(
                     epoch=current_epoch, batch_in_epoch=batch_in_epoch,
                     global_step=global_step, global_batch=global_batch,
                     total_steps=total_steps,
+                    update_attempts=update_attempts, consecutive_overflows=consecutive_overflows,
+                    best_reconstruction_loss=best_reconstruction_loss,
                 ))
+            if repeated_overflow:
+                raise FloatingPointError(
+                    "20 consecutive AMP overflows; stopped after saving latest.pt. "
+                    "Inspect loss_scale and inputs instead of repeatedly resuming this checkpoint."
+                )
             if stop_now and batch_in_epoch < batches_per_epoch:
                 return checkpoint_path
 
         if batch_in_epoch != batches_per_epoch:
             raise RuntimeError("Training loader ended before its reported batch count")
-        val_loss = validate(model, val_loader, device, run.seed + 10_000, run.amp)
+        metrics = validate(model, val_loader, device, run.seed + 10_000, run.amp)
+        if metrics["wells"] != manifest["counts"]["val"]:
+            raise RuntimeError("Validation well count does not match the manifest")
+        val_loss = metrics["masked_mse"]
+        validation_record = {
+            "step": global_step, "epoch": current_epoch, "update_attempts": update_attempts,
+            "val_reconstruction_loss": val_loss,  # Retain the original log field.
+            **{f"val_{key}": value for key, value in metrics.items()},
+        }
         with log_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps({
-                "step": global_step, "epoch": current_epoch,
-                "val_reconstruction_loss": val_loss,
-            }) + "\n")
-        print(f"epoch={current_epoch + 1} validation_reconstruction_loss={val_loss:.6f}", flush=True)
+            handle.write(json.dumps(validation_record, allow_nan=False) + "\n")
+        print(json.dumps(validation_record, allow_nan=False), flush=True)
+        improved = val_loss < best_reconstruction_loss
+        best_reconstruction_loss = min(best_reconstruction_loss, val_loss)
         batch_in_epoch = 0
-        _save_checkpoint(checkpoint_path, _checkpoint_state(
+        state = _checkpoint_state(
             model, optimizer, scaler, train_loader, run, manifest_hash,
             epoch=current_epoch + 1, batch_in_epoch=0,
             global_step=global_step, global_batch=global_batch,
             total_steps=total_steps,
-        ))
+            update_attempts=update_attempts, consecutive_overflows=consecutive_overflows,
+            best_reconstruction_loss=best_reconstruction_loss,
+        )
+        state["validation_metrics"] = metrics
+        _save_checkpoint(checkpoint_path, state)
+        if improved:
+            _save_checkpoint(output / "best_reconstruction.pt", state)
         if max_steps is not None and global_step >= max_steps:
             return checkpoint_path
     return checkpoint_path

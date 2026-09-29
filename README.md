@@ -1,6 +1,6 @@
 # CellViT
 
-当前已实现数据读取、空间掩码 MAE 基线的训练与孔位 embedding 导出。原始 RxRx3-core 目录保持只读；转换后的 MDS、缓存与日志放在新的可写目录。服务器上的完整训练和生物学检索评测仍需执行。
+当前已实现数据读取、空间掩码 MAE 训练、遮挡重建评估与孔位 embedding 导出。训练曲线和六通道重建图见 [02 重建评估 Notebook](notebooks/02_mae_training_and_reconstruction.ipynb)。原始 RxRx3-core 目录保持只读；转换后的 MDS、缓存与日志放在新的可写目录。模型效果需要在服务器实际运行后测定。
 
 ## 数据流
 
@@ -103,7 +103,51 @@ cellvit-train --mds-root /path/to/rxrx3_mds --output /path/to/runs/mae_smoke \
 
 正式实验改用新的输出目录和预定的 epoch 数。单张 3090 从 `batch-size 1` 起核查显存，再决定是否增大；梯度累积在优化器更新前按实际孔位数平均梯度。训练使用 FP16 自动混合精度、梯度缩放、AdamW、预热加余弦学习率；默认学习率为 `1.5e-4`。如需取消混合精度，可传 `--no-amp`。`config.json` 保存运行配置和 MDS 清单哈希，`metrics.jsonl` 记录训练损失、学习率、吞吐、峰值显存和每轮验证重建损失，`latest.pt` 保存模型、优化器、缩放器、读取进度和随机状态。恢复时需保持原训练参数与数据清单一致。
 
-验证重建损失只用于监控训练；它不是最终模型选择指标。跨 guide、跨板检索评测尚未实现，不应以像素重建损失宣称 embedding 的生物学质量。
+验证重建损失用于评价 MAE 本身的遮挡重建任务；最低验证 MSE 对应的完整检查点另存为 `best_reconstruction.pt`。这个名字只代表重建最佳。跨 guide、跨板检索评测尚未实现。
+
+### AMP 溢出与训练进度
+
+梯度累积先按计划的有效 batch 大小缩小 loss，再反向传播；在更新前按实际孔位数校正，最后不足一组的数据同样得到正确平均梯度。AMP 梯度出现 Inf/NaN 时，先由 `unscale_` 记录，再让 GradScaler 跳过本次参数更新、降低缩放系数，最后清空梯度；不对这些非有限梯度做裁剪。FP32 梯度异常、非有限 loss 或有限梯度的范数计算溢出仍会明确报错。
+
+`step` 只计成功更新；`update_attempts` 包含 AMP 跳过。学习率、`--log-every` 和 `--checkpoint-every` 按更新尝试次数推进，确保每个 epoch 的计划进度不因跳过而延后；`--max-steps` 仍限制成功更新总数。日志新增 `amp_overflow`、`skipped_updates`、`grad_norm`、`loss_scale_before`、`loss_scale`。连续 20 次溢出会保存 `latest.pt` 后停止，防止长期没有实际更新。
+
+原有 checkpoint 仍可用相同命令续训，缺少的新计数字段会自动补默认值；旧 checkpoint 的“最佳重建”从恢复后的验证开始记录。已完成全部 epoch 的旧 checkpoint 可以直接用下面的评估命令，无需重新训练。
+
+## 评价 MAE 的遮挡重建质量
+
+这是连续像素回归，不报告词/token 分类准确率。训练与评估共享 `model.reconstruction_target()`，默认目标是每个 patch 内每个通道的标准化像素。所有指标只统计 **被遮挡的位置**。
+
+| 字段 | 定义与解释 |
+| --- | --- |
+| `masked_mse` | 隐藏像素的平均平方误差，越低越好；与训练目标一致 |
+| `masked_rmse` | MSE 的平方根，单位为目标空间单位 |
+| `zero_baseline_mse` | 相同隐藏位置全部预测为 0 的误差，实际计算，不假设它等于 1 |
+| `reconstruction_skill` | `1 - masked_mse / zero_baseline_mse`，1 表示完美、0 表示与基线相同、负值表示更差；0.4 表示误差降低 40%，不是准确率 40% |
+| `per_channel_*` | 分别记录六个通道的 MSE、基线及相对评分 |
+
+评分先累计所有隐藏位置的误差，再计算比值；不平均每个 batch 的百分比。基线能量接近零时，相对评分记为 `null`，MSE 仍有效。关闭 `norm_pix_loss` 时目标变为原始 `[0,1]` 像素，零基线也随之变成黑色像素基线，这两种设置不能混比。
+
+轮末验证自动将指标以 `val_` 前缀写入 `metrics.jsonl`，保留旧的 `val_reconstruction_loss` 字段。还可随时评价已有 `latest.pt` 或 `best_reconstruction.pt`：
+
+```bash
+# 更新入口命令；使用已配置的 cellvit 环境，不重装依赖。
+python -m pip install -e . --no-deps
+
+cellvit-evaluate --checkpoint /path/to/runs/mae_smoke/latest.pt \
+  --mds-root /path/to/rxrx3_mds --split val \
+  --output /path/to/runs/mae_smoke/reconstruction_val.json
+```
+
+默认遍历整个 split，沿用 checkpoint 的 batch size、训练 seed + 10000 和 AMP 配置；没有 GPU 时使用 FP32 CPU。`--max-batches 32` 可做部分评估，报告包含 `wells`、`expected_wells`、`complete_split`，不能将部分结果当作整份验证集成绩。`--no-amp` 可以辅助排查推理溢出；精度会记录在报告里。输出文件需不存在。比较模型时固定数据、目标标准化、batch size、遮挡率、种子、样本顺序和计算精度。
+
+绘图只放在 Notebook 中：
+
+```bash
+export CELLVIT_RUN_DIR=/path/to/runs/mae_smoke
+jupyter lab notebooks/02_mae_training_and_reconstruction.ipynb
+```
+
+Notebook 可读取旧/新日志，显示训练与验证曲线、AMP 缩放记录，直接评估 checkpoint 并绘制六通道指标与重建图。重建展示在训练目标空间中进行，不借用隐藏 patch 的真实均值/方差恢复原始强度。显示时可见区域复制真实目标，误差仍只统计隐藏区域。默认 `MAX_BATCHES=None` 为全量评估，也可改为明确标注的部分预览。
 
 ## 导出孔位 embedding
 

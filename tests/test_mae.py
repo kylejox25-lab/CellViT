@@ -40,6 +40,18 @@ def test_invalid_geometry_and_input_fail_early() -> None:
         tiny_model().encode(torch.rand(1, 3, 32, 32))
 
 
+def test_patch_round_trip_and_shared_target() -> None:
+    model = tiny_model()
+    image = torch.rand(2, 6, 32, 32)
+    assert torch.equal(model.unpatchify(model.patchify(image)), image)
+    result = model(image, generator=torch.Generator().manual_seed(17))
+    target = model.reconstruction_target(image)
+    error = (result["prediction"].float().reshape_as(target) - target).square()
+    expected = error[result["mask"].bool()].mean()
+    assert torch.allclose(result["loss"], expected)
+    assert torch.allclose(target.mean(dim=-1), torch.zeros_like(target[..., 0]), atol=1e-5)
+
+
 def test_learning_rate_warmup_then_decay() -> None:
     assert learning_rate(0, 100, 0.01, 0.1) == pytest.approx(0.001)
     assert learning_rate(9, 100, 0.01, 0.1) == pytest.approx(0.01)

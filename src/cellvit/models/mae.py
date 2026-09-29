@@ -145,6 +145,29 @@ class MaskedAutoencoder(nn.Module):
         self._check_image(image)
         return self.patch_embed(image).flatten(2).transpose(1, 2) + self.encoder_pos
 
+    def unpatchify(self, patches: Tensor) -> Tensor:
+        """Invert patchify; input is [B, N, C, patch_size**2]."""
+        cfg = self.config
+        patch = cfg.patch_size
+        grid = cfg.image_size // patch
+        expected = (self.num_patches, cfg.in_channels, patch * patch)
+        if patches.ndim != 4 or tuple(patches.shape[1:]) != expected:
+            raise ValueError(f"Expected patches [batch, {expected}], got {tuple(patches.shape)}")
+        return (
+            patches.reshape(-1, grid, grid, cfg.in_channels, patch, patch)
+            .permute(0, 3, 1, 4, 2, 5)
+            .reshape(-1, cfg.in_channels, cfg.image_size, cfg.image_size)
+        )
+
+    def reconstruction_target(self, image: Tensor) -> Tensor:
+        """Shared FP32 target for training, evaluation, and visualization."""
+        target = self.patchify(image).float()
+        if self.config.norm_pix_loss:
+            mean = target.mean(dim=-1, keepdim=True)
+            variance = target.var(dim=-1, keepdim=True, unbiased=False)
+            target = (target - mean) / (variance + 1e-6).sqrt()
+        return target
+
     def encode(self, image: Tensor) -> Tensor:
         """Encode all patches and average them into one vector per well."""
         tokens = self._tokens(image)
@@ -185,11 +208,7 @@ class MaskedAutoencoder(nn.Module):
         mask = torch.ones(batch, count, device=image.device, dtype=prediction.dtype)
         mask[:, :visible_count] = 0
         mask = torch.gather(mask, 1, ids_restore)
-        target = self.patchify(image).float()
-        if cfg.norm_pix_loss:
-            mean = target.mean(dim=-1, keepdim=True)
-            variance = target.var(dim=-1, keepdim=True, unbiased=False)
-            target = (target - mean) / (variance + 1e-6).sqrt()
+        target = self.reconstruction_target(image)
         prediction_by_channel = prediction.float().reshape_as(target)
         per_patch = (prediction_by_channel - target).square().mean(dim=(-1, -2))
         loss = (per_patch * mask).sum() / mask.sum()

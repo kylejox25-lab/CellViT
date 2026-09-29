@@ -23,6 +23,7 @@ cellvit-convert = "cellvit.data.convert:main"
 cellvit-check-loader = "cellvit.data.check_loader:main"
 cellvit-train = "cellvit.train.mae:main"
 cellvit-embed = "cellvit.infer:main"
+cellvit-evaluate = "cellvit.evaluate:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
