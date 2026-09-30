@@ -117,6 +117,17 @@ cellvit-train --mds-root /path/to/rxrx3_mds --output /path/to/runs/mae_smoke \
 
 ## 评价 MAE 的遮挡重建质量
 
+### 多轮正式训练
+
+`scripts/train_mae.sh` 从头启动多轮训练，默认 20 个 epoch、batch size 2、梯度累积 32。修改脚本顶部的 MDS 路径和新输出目录后，在项目根目录执行：
+
+```bash
+conda activate cellvit
+bash scripts/train_mae.sh
+```
+
+每轮自动完整验证并保存最佳重建模型。20 轮是起始实验预算，是否训练充分应根据验证 MSE 和相对重建评分的趋势判断；当前不自动早停。中断时在训练命令末尾追加 `--resume "$RUN_DIR/latest.pt"`，总轮数及其余训练参数保持不变。之前 1 轮测试任务的 checkpoint 不能直接改为 20 轮续训。
+
 ### 续训和评估脚本
 
 修改 `scripts/run_mae_workflow.sh` 顶部的 `MDS_ROOT` 和 `RUN_DIR`，然后在服务器项目根目录执行：
