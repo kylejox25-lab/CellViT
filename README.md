@@ -117,6 +117,19 @@ cellvit-train --mds-root /path/to/rxrx3_mds --output /path/to/runs/mae_smoke \
 
 ## 评价 MAE 的遮挡重建质量
 
+### 一键运行已有 checkpoint 的完整流程
+
+在服务器激活 `cellvit` 环境后执行：
+
+```bash
+conda activate cellvit
+bash scripts/run_mae_workflow.sh /path/to/runs/mae_batch2_test
+```
+
+脚本先用 16 个 batch 评价 `latest.pt`，然后从 `config.json` 自动恢复全部训练参数和模型配置，继续完成原定 epoch，最后导出最佳重建 checkpoint 的完整验证报告。它不会延长原定总轮数；如已完成训练，训练入口直接返回。第二个参数可以修改预览 batch 数，例如 `bash scripts/run_mae_workflow.sh /path/to/run 32`。
+
+每次执行新建 `RUN_DIR/workflow_时间_随机后缀/`，保存 `preview.json`、`preview.log`、`train.log`、`model_config.json` 和最终 `validation.json`。优先复用 checkpoint 中的完整轮末验证指标；旧 checkpoint 未保存指标时才重新完整评估。任一步失败会停止，可修复后重新调用脚本。执行前结束使用同一输出目录的其它训练进程。绘图仍在 `02_mae_training_and_reconstruction.ipynb` 中进行。
+
 这是连续像素回归，不报告词/token 分类准确率。训练与评估共享 `model.reconstruction_target()`，默认目标是每个 patch 内每个通道的标准化像素。所有指标只统计 **被遮挡的位置**。
 
 | 字段 | 定义与解释 |
