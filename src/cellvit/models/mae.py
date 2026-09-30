@@ -176,7 +176,7 @@ class MaskedAutoencoder(nn.Module):
         return self.encoder_norm(tokens).mean(dim=1)
 
     def forward(self, image: Tensor, *, generator: torch.Generator | None = None) -> dict[str, Tensor]:
-        """Train with spatial masking; return loss, predictions, and patch mask.
+        """Return loss, prediction, mask, and the shared reconstruction target.
 
         mask=1 marks a hidden patch. Per-patch, per-channel target normalization
         prevents one bright channel from dominating the pixel loss.
@@ -205,11 +205,12 @@ class MaskedAutoencoder(nn.Module):
             decoded = block(decoded)
         prediction = self.decoder_pred(self.decoder_norm(decoded))
 
-        mask = torch.ones(batch, count, device=image.device, dtype=prediction.dtype)
+        # Count masks in FP32: an FP16 sum can overflow for larger batches.
+        mask = torch.ones(batch, count, device=image.device, dtype=torch.float32)
         mask[:, :visible_count] = 0
         mask = torch.gather(mask, 1, ids_restore)
         target = self.reconstruction_target(image)
         prediction_by_channel = prediction.float().reshape_as(target)
         per_patch = (prediction_by_channel - target).square().mean(dim=(-1, -2))
         loss = (per_patch * mask).sum() / mask.sum()
-        return {"loss": loss, "prediction": prediction, "mask": mask}
+        return {"loss": loss, "prediction": prediction, "mask": mask, "target": target}

@@ -7,6 +7,8 @@ import hashlib
 import json
 import math
 import os
+import sys
+import time
 from itertools import islice
 from pathlib import Path
 
@@ -21,33 +23,38 @@ class ReconstructionMetrics:
     def __init__(self) -> None:
         self.squared_error: torch.Tensor | None = None
         self.zero_error: torch.Tensor | None = None
-        self.masked_patches = 0
+        self.masked_patches: torch.Tensor | None = None
 
     @torch.no_grad()
     def update(self, prediction: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -> None:
         prediction = prediction.float().reshape_as(target)
         if mask.shape != target.shape[:2]:
             raise ValueError("Mask and target patch dimensions do not match")
-        if not torch.isfinite(prediction).all() or not torch.isfinite(target).all():
+        finite = torch.isfinite(prediction).all() & torch.isfinite(target).all()
+        if not bool(finite):
             raise FloatingPointError("Non-finite reconstruction prediction or target")
         hidden = mask.bool()
-        # [hidden patches, channels, pixels] -> sum of patch MSE per channel.
-        error = (prediction[hidden] - target[hidden]).square().mean(dim=-1)
-        baseline = target[hidden].square().mean(dim=-1)
-        error = error.sum(dim=0, dtype=torch.float64).cpu()
-        baseline = baseline.sum(dim=0, dtype=torch.float64).cpu()
+        # Dense reductions avoid dynamic boolean indexing and its GPU syncs.
+        error = (prediction - target).square().mean(dim=-1)
+        baseline = target.square().mean(dim=-1)
+        error = torch.where(hidden.unsqueeze(-1), error, 0).sum(dim=(0, 1), dtype=torch.float64)
+        baseline = torch.where(hidden.unsqueeze(-1), baseline, 0).sum(dim=(0, 1), dtype=torch.float64)
+        count = hidden.sum()
         if self.squared_error is None:
             self.squared_error, self.zero_error = error, baseline
+            self.masked_patches = count
         else:
             self.squared_error += error
             self.zero_error += baseline
-        self.masked_patches += int(hidden.sum())
+            self.masked_patches += count
 
     def compute(self) -> dict:
-        if not self.masked_patches:
+        count = 0 if self.masked_patches is None else int(self.masked_patches)
+        if not count:
             raise ValueError("No masked patches were evaluated")
-        channel_mse = self.squared_error / self.masked_patches
-        channel_baseline = self.zero_error / self.masked_patches
+        # Only copy accumulated channel totals when reporting, not every batch.
+        channel_mse = self.squared_error.cpu() / count
+        channel_baseline = self.zero_error.cpu() / count
         mse, baseline = float(channel_mse.mean()), float(channel_baseline.mean())
         if not math.isfinite(mse) or not math.isfinite(baseline):
             raise FloatingPointError("Non-finite reconstruction error")
@@ -61,7 +68,7 @@ class ReconstructionMetrics:
             "masked_rmse": math.sqrt(mse),
             "zero_baseline_mse": baseline,
             "reconstruction_skill": skill(mse, baseline),
-            "masked_patches": int(self.masked_patches),
+            "masked_patches": count,
             "per_channel_mse": channel_mse.tolist(),
             "per_channel_zero_baseline_mse": channel_baseline.tolist(),
             "per_channel_reconstruction_skill": [
@@ -80,6 +87,7 @@ def evaluate_reconstruction(
     seed: int = 12026,
     amp: bool = False,
     max_batches: int | None = None,
+    log_every: int = 50,
 ) -> dict:
     """Fixed masks given the same seed, loader order, and batch size.
 
@@ -88,13 +96,27 @@ def evaluate_reconstruction(
     """
     if max_batches is not None and max_batches < 1:
         raise ValueError("max_batches must be positive")
+    if log_every < 0:
+        raise ValueError("log_every must be nonnegative (0 disables progress)")
     model.eval()
     metrics = ReconstructionMetrics()
     wells = batches = 0
     seen: set[str] = set()
     selected = loader if max_batches is None else islice(loader, max_batches)
     use_amp = amp and device.type == "cuda"
+    total_batches = len(loader) if hasattr(loader, "__len__") else None
+    if max_batches is not None and total_batches is not None:
+        total_batches = min(total_batches, max_batches)
+    if log_every:
+        print(
+            f"Evaluation starting: device={device}, AMP={use_amp}, "
+            f"batches={total_batches if total_batches is not None else 'unknown'}. Waiting for data...",
+            file=sys.stderr, flush=True,
+        )
+    started = last_finished = last_report = time.perf_counter()
+    loader_wait = 0.0
     for index, batch in enumerate(selected):
+        loader_wait += time.perf_counter() - last_finished
         image = batch["image"].to(device, non_blocking=True)
         ids = batch["well_id"]
         if len(ids) != len(image) or len(set(ids)) != len(ids) or seen.intersection(ids):
@@ -103,11 +125,32 @@ def evaluate_reconstruction(
         generator = torch.Generator(device=device).manual_seed(seed + index)
         with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=use_amp):
             result = model(image, generator=generator)
-        metrics.update(result["prediction"], model.reconstruction_target(image), result["mask"])
+        metrics.update(result["prediction"], result["target"], result["mask"])
         wells += len(image)
         batches += 1
+        if log_every and (
+            batches == 1 or batches % log_every == 0 or time.perf_counter() - last_report >= 30
+        ):
+            summary = metrics.compute()
+            elapsed = time.perf_counter() - started
+            eta = max(0, total_batches - batches) * elapsed / batches if total_batches is not None else None
+            print(
+                f"Evaluation {batches}/{total_batches if total_batches is not None else '?'} batches, "
+                f"wells={wells}, MSE={summary['masked_mse']:.6f}, "
+                f"speed={wells / max(elapsed, 1e-6):.2f} wells/s, "
+                f"elapsed={elapsed:.1f}s, ETA={f'{eta:.1f}s' if eta is not None else 'unknown'}",
+                file=sys.stderr, flush=True,
+            )
+            last_report = time.perf_counter()
+        last_finished = time.perf_counter()
+    summary = metrics.compute()
+    elapsed = time.perf_counter() - started
+    if log_every:
+        print(f"Evaluation complete: {wells} wells in {elapsed:.1f}s", file=sys.stderr, flush=True)
     return {
-        **metrics.compute(), "wells": wells, "batches": batches,
+        **summary, "wells": wells, "batches": batches,
+        "elapsed_seconds": elapsed, "wells_per_second": wells / max(elapsed, 1e-6),
+        "loader_wait_seconds": loader_wait,
         "mask_seed": seed, "max_batches": max_batches,
         "mask_ratio": model.config.mask_ratio,
         "target_space": "patch_channel_standardized" if model.config.norm_pix_loss else "raw_0_1",
@@ -127,6 +170,7 @@ def main() -> None:
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--seed", type=int, help="Default: training seed + 10000")
     parser.add_argument("--max-batches", type=int, help="Optional partial evaluation")
+    parser.add_argument("--log-every", type=int, default=50, help="Progress interval; 0 disables progress")
     parser.add_argument("--no-amp", action="store_true", help="Use FP32 instead of checkpoint precision")
     args = parser.parse_args()
     root, destination = args.mds_root.resolve(), args.output.resolve()
@@ -139,6 +183,10 @@ def main() -> None:
     manifest = json.loads(manifest_bytes)
     if manifest.get("format") != "rxrx3-core-well-mds-v1" or not manifest.get("complete"):
         raise ValueError("Evaluation requires a complete MDS conversion")
+    if (args.max_batches is not None and args.max_batches < 1) or args.log_every < 0:
+        raise ValueError("Invalid max-batches or log-every")
+    if args.log_every:
+        print(f"Loading checkpoint: {args.checkpoint}", file=sys.stderr, flush=True)
     # Load only trusted checkpoints produced by this project.
     state = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
     if state.get("format") != "cellvit-spatial-mae-v1":
@@ -153,13 +201,15 @@ def main() -> None:
     model = MaskedAutoencoder(MAEConfig(**state["model_config"]))
     model.load_state_dict(state["model"])
     model.to(device)
+    if args.log_every:
+        print(f"Preparing {args.split} loader with {args.num_workers} workers", file=sys.stderr, flush=True)
     loader = make_dataloader(
         mds_root=args.mds_root, split=args.split, batch_size=batch_size,
-        num_workers=args.num_workers,
+        num_workers=args.num_workers, shuffle_seed=state["run_config"]["seed"],
     )
     report = evaluate_reconstruction(
         model, loader, device, seed=seed, amp=state["run_config"]["amp"] and not args.no_amp,
-        max_batches=args.max_batches,
+        max_batches=args.max_batches, log_every=args.log_every,
     )
     expected = manifest["counts"][args.split]
     if args.max_batches is None and report["wells"] != expected:

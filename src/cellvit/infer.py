@@ -30,6 +30,9 @@ def export_embeddings(
         raise ValueError("batch_size must be positive and num_workers nonnegative")
     if split not in {"train", "val", "test"}:
         raise ValueError(f"Invalid split: {split}")
+    root, destination = mds_root.resolve(), output.resolve()
+    if destination == root or root in destination.parents:
+        raise ValueError("Embedding output must be outside the MDS directory")
     if output.exists():
         raise FileExistsError(output)
     temporary = output.with_suffix(output.suffix + ".incomplete")
@@ -52,6 +55,7 @@ def export_embeddings(
     model = MaskedAutoencoder(config)
     model.load_state_dict(state["model"])
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    use_amp = state["run_config"]["amp"] and device.type == "cuda"
     model = model.to(device).eval()
     loader = make_dataloader(
         mds_root=mds_root, split=split, batch_size=batch_size,
@@ -69,7 +73,7 @@ def export_embeddings(
                 image = batch["image"].to(device, non_blocking=True)
                 with torch.autocast(
                     device_type=device.type, dtype=torch.float16,
-                    enabled=device.type == "cuda",
+                    enabled=use_amp,
                 ):
                     embedding = model.encode(image).float()
                 if not torch.isfinite(embedding).all():

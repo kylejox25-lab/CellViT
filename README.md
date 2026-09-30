@@ -113,6 +113,8 @@ cellvit-train --mds-root /path/to/rxrx3_mds --output /path/to/runs/mae_smoke \
 
 原有 checkpoint 仍可用相同命令续训，缺少的新计数字段会自动补默认值；旧 checkpoint 的“最佳重建”从恢复后的验证开始记录。已完成全部 epoch 的旧 checkpoint 可以直接用下面的评估命令，无需重新训练。
 
+轮末保存和恢复时，将 Streaming 游标显式对齐为下一轮 `epoch`、`sample_in_epoch=0`；旧 checkpoint 也会在读取时修正。中途保存的样本偏移保持原值。该处理依据 [Streaming 0.13.0 的游标实现](https://github.com/mosaicml/streaming/blob/v0.13.0/streaming/base/dataset.py)，避免训练计数与数据读取位置落在不同 epoch。
+
 ## 评价 MAE 的遮挡重建质量
 
 这是连续像素回归，不报告词/token 分类准确率。训练与评估共享 `model.reconstruction_target()`，默认目标是每个 patch 内每个通道的标准化像素。所有指标只统计 **被遮挡的位置**。
@@ -140,6 +142,8 @@ cellvit-evaluate --checkpoint /path/to/runs/mae_smoke/latest.pt \
 
 默认遍历整个 split，沿用 checkpoint 的 batch size、训练 seed + 10000 和 AMP 配置；没有 GPU 时使用 FP32 CPU。`--max-batches 32` 可做部分评估，报告包含 `wells`、`expected_wells`、`complete_split`，不能将部分结果当作整份验证集成绩。`--no-amp` 可以辅助排查推理溢出；精度会记录在报告里。输出文件需不存在。比较模型时固定数据、目标标准化、batch size、遮挡率、种子、样本顺序和计算精度。
 
+评估现在显示 checkpoint 加载、数据准备和运行进度：默认每 50 个 batch 或完成一个 batch 后距上次报告达到 30 秒时，输出当前 MSE、孔位数、速度、耗时和 ETA。`--log-every 10` 可提高频率，`--log-every 0` 关闭进度。进度写入 stderr，最终 JSON 保留在 stdout。报告新增 `elapsed_seconds`、`wells_per_second` 和 `loader_wait_seconds`；后者是主进程等待 DataLoader 返回样本的时间，不是 worker 解码时间的总和。模型前向返回的目标直接用于评估，避免重复标准化；通道误差在设备上累计，报告时才复制到 CPU。实际提速需要服务器实测。
+
 绘图只放在 Notebook 中：
 
 ```bash
@@ -160,6 +164,8 @@ cellvit-embed --checkpoint /path/to/runs/mae_smoke/latest.pt \
 ```
 
 导出器检查向量有限、`well_id` 无重复、总孔数与 MDS 清单一致，并核对检查点的数据清单哈希。输出 Parquet 包含 `well_id` 和固定长度 `embedding` 列；后续评测可按 `well_id` 连接原始元数据。转换、训练和导出均不会修改原始 RxRx3-core 图像目录。
+
+导出时沿用 checkpoint 的 AMP 设置；FP32 训练的模型不会在导出阶段自动切成 FP16。输出路径不得位于 MDS 数据目录内。
 
 ## 依据
 

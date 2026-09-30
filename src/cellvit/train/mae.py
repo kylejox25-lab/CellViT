@@ -76,6 +76,18 @@ def _save_checkpoint(path: Path, state: dict) -> None:
     os.replace(temporary, path)
 
 
+def _loader_progress(state: dict, epoch: int, batch_in_epoch: int) -> dict:
+    """Align an epoch-start checkpoint with Streaming's epoch/sample cursor.
+
+    Streaming 0.13 reports the last iterated epoch even after exhaustion.
+    Mid-epoch offsets already include any previous resume and must be retained.
+    """
+    result = dict(state)
+    if batch_in_epoch == 0:
+        result.update(epoch=epoch, sample_in_epoch=0)
+    return result
+
+
 def _checkpoint_state(
     model: MaskedAutoencoder,
     optimizer: torch.optim.Optimizer,
@@ -101,7 +113,7 @@ def _checkpoint_state(
         "model": model.state_dict(),
         "optimizer": optimizer.state_dict(),
         "scaler": scaler.state_dict(),
-        "loader": loader.state_dict(),
+        "loader": _loader_progress(loader.state_dict(), epoch, batch_in_epoch),
         "epoch": epoch,
         "batch_in_epoch": batch_in_epoch,
         "global_step": global_step,
@@ -199,9 +211,10 @@ def train(
         model.load_state_dict(state["model"])
         optimizer.load_state_dict(state["optimizer"])
         scaler.load_state_dict(state["scaler"])
-        train_loader.load_state_dict(state["loader"])
         epoch = state["epoch"]
         batch_in_epoch = state["batch_in_epoch"]
+        # Also repair epoch-boundary cursors from older checkpoints.
+        train_loader.load_state_dict(_loader_progress(state["loader"], epoch, batch_in_epoch))
         global_step = state["global_step"]
         global_batch = state["global_batch"]
         # Old checkpoints predate AMP skip handling and reconstruction selection.
@@ -236,7 +249,8 @@ def train(
         model.train()
         epoch_started = time.perf_counter()
         epoch_wells = 0
-        epoch_batches = () if batch_in_epoch == batches_per_epoch else train_loader
+        resuming_finished_epoch = batch_in_epoch == batches_per_epoch
+        epoch_batches = () if resuming_finished_epoch else train_loader
         for batch_index, batch in enumerate(epoch_batches, start=batch_in_epoch):
             image = batch["image"].to(device, non_blocking=True)
             generator = torch.Generator(device=device.type).manual_seed(run.seed + global_batch)
@@ -344,6 +358,9 @@ def train(
         _save_checkpoint(checkpoint_path, state)
         if improved:
             _save_checkpoint(output / "best_reconstruction.pt", state)
+        if resuming_finished_epoch:
+            # No train iterator ran to advance Streaming's internal epoch.
+            train_loader.load_state_dict(state["loader"])
         if max_steps is not None and global_step >= max_steps:
             return checkpoint_path
     return checkpoint_path
