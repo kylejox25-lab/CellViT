@@ -6,7 +6,7 @@
 
 `35 个原始 Parquet 分片 → 每孔 6 个 JP2 字节 → MDS train/val/test → StreamingDataLoader`
 
-转换器保留 JP2 压缩字节，不把图像预先展开成大数组；每个 MDS 样本对应一个孔位。读取器解码后返回完整孔位图像 `image`：`[batch, 6, 512, 512]`，数值为 `float32 [0,1]`。不在读取阶段裁切。模型以 16×16 图像 patch 处理完整孔位，每孔对应 1024 个空间 token；尺寸定义见 `src/cellvit/image_config.py`。
+转换器保留 JP2 压缩字节，不把图像预先展开成大数组；每个 MDS 样本对应一个孔位。读取器解码后返回完整孔位图像 `image`：`[batch, 6, 512, 512]`，数值为 `float32 [0,1]`。模型以 16×16 图像 patch 处理完整孔位，每孔对应 1024 个空间 token；尺寸定义见 `src/cellvit/image_config.py`。
 
 数据按每个实验内的整块孔板分成 train/val/test。`manifest.json` 记录数量、源分片大小、元数据哈希和转换是否完整；`plate_splits.json` 固定划分。`--max-wells` 只用于小样本冒烟测试，产生的 `complete=false` 数据不能用于正式训练。
 常规 `make_dataloader` 会拒绝读取不完整转换；检查命令仅为冒烟测试允许读取。
@@ -19,11 +19,10 @@
 conda env create -f environment.yml
 conda activate cellvit
 python -m pip install -e . --no-deps
+pip install torchinfo
 python -c "import torch, torchvision, streaming; print(torch.__version__, torchvision.__version__, torch.version.cuda, torch.cuda.is_available(), streaming.__version__)"
 python -m pytest -q
 ```
-
-如果环境已经存在，先运行 `conda env update -f environment.yml --prune`，再执行安装项目的命令。环境应使用 `pytorch 2.5.1` 的 CUDA 12.1 构建和 `torchvision 0.20.1` 的 cu121 构建；CPU 版 PyTorch 与 cu121 版 torchvision 混装会在导入时失败。`torch.version.cuda` 应为 `12.1`，`torch.cuda.is_available()` 在 3090 服务器上应为 `True`。
 
 要在 Jupyter 中使用该环境：
 
@@ -32,7 +31,7 @@ python -m ipykernel install --user --name cellvit --display-name "Python (cellvi
 jupyter lab
 ```
 
-打开 [数据检查 notebook](notebooks/01_explore_rxrx3_core.ipynb)，选择 `Python (cellvit)` 内核。Notebook 默认读取本机的 `E:\CellPainting\rxrx3_core`；在服务器上设置 `RXRX3_CORE_ROOT` 环境变量，或直接修改 notebook 第一段配置中的路径。
+打开 [数据检查 notebook](notebooks/01_explore_rxrx3_core.ipynb)，选择 `Python (cellvit)` 内核。在服务器上设置 `RXRX3_CORE_ROOT` 环境变量，或直接修改 notebook 第一段配置中的路径。
 
 Linux 服务器示例：
 
