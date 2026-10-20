@@ -15,8 +15,13 @@ outputs/
 /runs/
 /logs/
 /try/
-/scripts/
-/configs/
+/scripts/*
+!/scripts/train_comparison.sh
+/configs/*
+!/configs/mae_comparison.json
+!/configs/ca_mae.json
+!/configs/diffmae.json
+!/configs/cnn_mae.json
 *.parquet
 *.jp2
 *.mds

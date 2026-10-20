@@ -1,0 +1,16 @@
+{
+  "model_type": "diffmae",
+  "image_size": 512,
+  "patch_size": 8,
+  "in_channels": 6,
+  "encoder_dim": 512,
+  "encoder_depth": 12,
+  "encoder_heads": 8,
+  "decoder_dim": 256,
+  "decoder_depth": 4,
+  "decoder_heads": 8,
+  "mlp_ratio": 4.0,
+  "mask_ratio": 0.75,
+  "norm_pix_loss": true,
+  "diffusion_steps": 1000
+}

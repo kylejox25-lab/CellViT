@@ -17,6 +17,13 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
+analysis = [
+    "pandas>=2.2,<3",
+    "matplotlib>=3.8,<4",
+    "scikit-learn>=1.4,<2",
+    "nbformat>=5,<6",
+    "jupyterlab>=4,<5",
+]
 
 [project.scripts]
 cellvit-convert = "cellvit.data.convert:main"

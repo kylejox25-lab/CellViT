@@ -1,4 +1,4 @@
-"""Train the spatial MAE baseline on complete RxRx3-core MDS wells."""
+"""Train masked autoencoder architectures on complete RxRx3-core MDS wells."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ from streaming import StreamingDataLoader
 
 from cellvit.data.streaming_dataset import make_dataloader
 from cellvit.evaluate import evaluate_reconstruction
-from cellvit.models import MAEConfig, MaskedAutoencoder
+from cellvit.models import CHECKPOINT_FORMATS, MAEConfig, MaskedAutoencoder, build_model
 from cellvit.train.optimization import optimizer_step
 
 
@@ -26,7 +26,7 @@ from cellvit.train.optimization import optimizer_step
 class TrainConfig:
     mds_root: str
     output: str
-    epochs: int = 1
+    epochs: int = 50
     batch_size: int = 1
     num_workers: int = 4
     accumulation_steps: int = 64
@@ -106,7 +106,8 @@ def _checkpoint_state(
     best_reconstruction_loss: float,
 ) -> dict:
     return {
-        "format": "cellvit-spatial-mae-v1",
+        "format": ("cellvit-spatial-mae-v1" if model.config.model_type == "mae"
+                   else "cellvit-masked-autoencoder-v2"),
         "model_config": model.config.to_dict(),
         "run_config": asdict(run_config),
         "manifest_sha256": manifest_hash,
@@ -179,7 +180,7 @@ def train(
     if batches_per_epoch < 1:
         raise RuntimeError("Training loader produced no batches")
     total_steps = run.epochs * math.ceil(batches_per_epoch / run.accumulation_steps)
-    model = MaskedAutoencoder(model_config).to(device)
+    model = build_model(model_config).to(device)
     decay: list[torch.nn.Parameter] = []
     no_decay: list[torch.nn.Parameter] = []
     for name, parameter in model.named_parameters():
@@ -202,9 +203,12 @@ def train(
 
     if resume is not None:
         state = torch.load(resume, map_location="cpu", weights_only=False)
-        if state.get("format") != "cellvit-spatial-mae-v1":
-            raise ValueError("Not a CellViT spatial MAE checkpoint")
-        if state["run_config"] != asdict(run) or state["model_config"] != model_config.to_dict():
+        if state.get("format") not in CHECKPOINT_FORMATS:
+            raise ValueError("Not a supported CellViT masked autoencoder checkpoint")
+        saved_config = MAEConfig(**state["model_config"])
+        if state["format"] == "cellvit-spatial-mae-v1" and saved_config.model_type != "mae":
+            raise ValueError("Legacy spatial checkpoints must contain a spatial MAE")
+        if state["run_config"] != asdict(run) or saved_config != model_config:
             raise ValueError("Resume requires the same training and model configuration")
         if state["manifest_sha256"] != manifest_hash or state["total_steps"] != total_steps:
             raise ValueError("Dataset manifest or training length changed since checkpoint")
@@ -233,6 +237,11 @@ def train(
                 "manifest_sha256": manifest_hash,
                 "device": str(device), "train_wells": manifest["counts"]["train"],
                 "val_wells": manifest["counts"]["val"],
+                "parameter_count": sum(parameter.numel() for parameter in model.parameters()),
+                "encoder_parameter_count": sum(
+                    parameter.numel() for name, parameter in model.named_parameters()
+                    if name.startswith(("patch_embed.", "encoder_", "tokenizer."))
+                ),
             }, indent=2), encoding="utf-8",
         )
 
@@ -331,12 +340,15 @@ def train(
 
         if batch_in_epoch != batches_per_epoch:
             raise RuntimeError("Training loader ended before its reported batch count")
+        training_seconds = time.perf_counter() - epoch_started
         metrics = validate(model, val_loader, device, run.seed + 10_000, run.amp)
         if metrics["wells"] != manifest["counts"]["val"]:
             raise RuntimeError("Validation well count does not match the manifest")
         val_loss = metrics["masked_mse"]
         validation_record = {
             "step": global_step, "epoch": current_epoch, "update_attempts": update_attempts,
+            "epoch_training_seconds": training_seconds,
+            "model_type": model.config.model_type,
             "val_reconstruction_loss": val_loss,  # Retain the original log field.
             **{f"val_{key}": value for key, value in metrics.items()},
         }
@@ -370,7 +382,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mds-root", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--epochs", type=int, default=1)
+    parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--accumulation-steps", type=int, default=64)

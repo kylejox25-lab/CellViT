@@ -2,7 +2,9 @@
 
 > 状态：研究设计 v0.4。训练资源为服务器单张 RTX 3090（24 GB）；服务器已可读取 RxRx3-core，连续训练时间暂不设上限。本地数据目录 `E:\CellPainting\rxrx3_core` 只读；服务器上的数据同样按只读使用。代码、索引、缓存、检查点和结果写在项目目录或服务器另设的可写目录。
 
-实施进度：已实现 Parquet→孔位级 MDS 转换、Streaming 读取、空间 MAE 训练和 embedding 导出。训练现已加入 AMP 溢出恢复、遮挡重建指标及 `best_reconstruction.pt` 保存；[02 重建评估 Notebook](notebooks/02_mae_training_and_reconstruction.ipynb) 负责曲线和六通道重建可视化。该检查点评价 MAE 自身的重建任务，生物学检索评测仍待实现。此次修改未在本地运行测试或训练，需在服务器执行后报告真实指标。使用方法见 [README.md](README.md)。
+2026-10-20 实验更新：按确认方案新增通道无关 CA-MAE、DiffMAE 与 CNN 掩码自编码器，普通 MAE 作为参考。新的对照配置为六通道 512×512 完整输入、8×8 patch、0.75 掩码率、512/256 编码/解码维度、Transformer 两端各 8 heads、50 epochs；其它训练参数沿用现有实现。原 16×16 基线配置保留供旧检查点使用。评价实现与原理见 [03 表征比较 Notebook](notebooks/03_representation_comparison.ipynb)，训练入口见 [README](README.md)。以下早期研究设计中的 16×16/ViT-S 配置为历史起点；不同模型预算与掩码任务差异须分别报告。新增模型的真实训练效果需在服务器运行后测定。
+
+实施进度：已实现 Parquet→孔位级 MDS 转换、Streaming 读取、多种掩码模型训练和 embedding 导出。训练包含 AMP 溢出恢复、遮挡重建指标及 `best_reconstruction.pt` 保存；[02 重建评估 Notebook](notebooks/02_mae_training_and_reconstruction.ipynb) 负责原基线曲线和六通道重建可视化。[03 表征比较 Notebook](notebooks/03_representation_comparison.ipynb) 与 `embedding_metrics.py` 新增跨 guide 基因、跨板化合物检索及重复一致性评价。重建检查点按各自的重建目标选择，不表示生物学表征最佳。真实模型训练与显存测试仍需在服务器执行。使用方法见 [README.md](README.md)。
 
 ## 1. 研究目标与问题
 

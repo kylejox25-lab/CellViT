@@ -2,6 +2,52 @@
 
 当前已实现数据读取、空间掩码 MAE 训练、遮挡重建评估与孔位 embedding 导出。训练曲线和六通道重建图见 [02 重建评估 Notebook](notebooks/02_mae_training_and_reconstruction.ipynb)。原始 RxRx3-core 目录保持只读；转换后的 MDS、缓存与日志放在新的可写目录。模型效果需要在服务器实际运行后测定。
 
+新增 CA-MAE、DiffMAE 和 CNN 掩码自编码器，以及 [03 表征比较 Notebook](notebooks/03_representation_comparison.ipynb)。新对照实验使用 8×8 patch、75% 掩码、512/256 维编码器/解码器，Transformer 两端均为 8 heads，训练 50 轮；完整输入仍为六通道 512×512。原有 `mae_small.json` 保留作旧配置，新实验使用下面的四份配置。
+
+## 四种掩码表征模型对照
+
+| 方法 | 模型文件 | 新实验配置 | 干净完整输入的 embedding |
+| --- | --- | --- | --- |
+| 普通 MAE（参考） | `src/cellvit/models/mae.py` | `configs/mae_comparison.json` | 编码器 token 均值，512 维 |
+| CA-MAE | `src/cellvit/models/CA-MAE.py` | `configs/ca_mae.json` | 所有通道 token 均值，512 维 |
+| DiffMAE | `src/cellvit/models/DiffMAE.py` | `configs/diffmae.json` | 干净图像编码器 token 均值，512 维 |
+| CNN-MAE | `src/cellvit/models/cnn_mae.py` | `configs/cnn_mae.json` | 卷积特征全局平均池化，512 维 |
+
+四组均从零初始化，沿用现有板级 train/val/test、输入预处理、12/4 层深度、AdamW、学习率、种子和有效 batch。CNN 的深度指残差卷积块数，heads 对它不适用。它在首个卷积前遮住整块空间 patch，无原图跳连；稠密卷积仍处理整个网格。CA-MAE 使用共享单通道投影、共享固定空间位置编码和独立通道 decoder，不加入通道身份编码；它支持改变输入通道数进行编码。`model.encode(image, pooling="channel_concat")` 可额外返回按输入通道排序的 6×512 维表征，仅作不同聚合方式的附加比较。
+
+DiffMAE 使用带噪隐藏 patch 查询、干净可见 patch 条件和 cross-attention decoder，预测干净的 x₀。这里采用 1000 步 cosine 噪声日程，并在原项目的逐 patch、逐通道标准化目标空间中扩散；属于适配多通道项目的实现，不能宣称逐项复现论文实验。embedding 推理只运行干净图像 encoder，无需扩散采样。
+
+服务器上先激活已有环境并更新入口，然后设置路径、执行四组训练及验证/测试 embedding 导出：
+
+```bash
+python -m pip install -e . --no-deps
+export RXRX3_MDS_ROOT=/path/to/rxrx3_mds
+export CELLVIT_COMPARISON_ROOT=/path/to/runs/comparison_patch8_50epochs
+bash scripts/train_comparison.sh
+```
+
+脚本默认 micro-batch=1、梯度累积=64，四组都训练 50 轮。中断后设置 `CELLVIT_RESUME=1` 用相同配置续训。输出目录已有但没有检查点时不会覆盖；已有完整 embedding 不重复导出。旧 16×16 配置的检查点仍可加载和导出，续训需继续使用原配置，不能直接切换新结构。
+
+CA-MAE 在当前完整输入下有 24,576 个通道 token，75% 遮挡后有 6,144 个可见 token；普通 MAE/DiffMAE 为 4,096/1,024 个。使用 SDPA 注意力，仍需在服务器先用 `--max-steps 2` 实测峰值显存和速度，再启动完整 50 轮。50 轮表示相同图像遍历次数，不能等同算力或充分收敛；训练记录包含参数量、耗时、吞吐和峰值显存。
+
+### embedding 评价与重建评价
+
+03 Notebook 按 `well_id` 连接真实 metadata，比较三种新增方法、普通 MAE 和可选公开表征（OpenPhenom、MAE-L、MAE-G、CellProfiler）。公开表征的训练数据、维数和预算不同，仅作背景参考。现有公开 Parquet 是 `well_id` 加多个标量特征列；新模型导出为 `well_id` 加固定长度 `embedding` 列，评测读取器兼容两种格式，并排除 CellProfiler 的索引列。
+
+主评估使用跨实验、跨 guide 的基因原型检索 MRR/Recall，以及同实验、同浓度、跨板的化合物 mAP/Recall；辅助报告 cosine/Pearson 相似度、重复一致性和批次审计。Notebook 解释公式、正负样本规则、覆盖率、随机基线及高低分含义。所有模型固定相同孔位、查询与候选集合；分组 bootstrap 以基因或化合物为单位。验证集用于选择配置，测试集用于最终报告；PCA 和全局标准化只在训练参考上拟合。二维 PCA/UMAP 图只作解释，不独立决定模型优劣。当前本地没有完整外部药物—基因关联真值，不伪造 MoA、毒性或靶点指标。
+
+轮末验证和默认 `cellvit-evaluate` 对 DiffMAE 报告随机 t 的去噪目标，字段为 `reconstruction_protocol=diffmae_sampled_t_denoising`；其低噪声输入包含部分真实信号，不能和 MAE 的隐藏重建误差直接排名。实际从噪声修复需指定 DDIM 采样步数，建议先在小预览上检查：
+
+```bash
+cellvit-evaluate --checkpoint /path/to/runs/diffmae/best_reconstruction.pt \
+  --mds-root /path/to/rxrx3_mds --split val --max-batches 4 \
+  --diffusion-sampling-steps 50 --output /path/to/diffmae_ddim_preview.json
+```
+
+CA-MAE 的独立通道掩码与其它模型的整块空间掩码也有条件信息差异，因此主要结论以 embedding 检索为准。所有重建指标仅统计实际隐藏的通道像素，报告每通道数量与 `mask_unit`。各模型的 `best_reconstruction.pt` 按自身验证目标选择，不表示生物学 embedding 最佳。
+
+实现依据：[CA-MAE 原论文](https://arxiv.org/abs/2404.10242)、[作者代码](https://github.com/recursionpharma/maes_microscopy)、[DiffMAE 原论文](https://arxiv.org/abs/2304.03283)、[RxRx3-core 官方 benchmark](https://github.com/recursionpharma/EFAAR_benchmarking/tree/trunk/RxRx3-core_benchmarks)、[copairs 检索评价](https://cytomining.github.io/copairs/api/map/)。
+
 ## 数据流
 
 `35 个原始 Parquet 分片 → 每孔 6 个 JP2 字节 → MDS train/val/test → StreamingDataLoader`
@@ -79,7 +125,7 @@ print(batch["image"].shape, batch["well_id"][:2])
 
 `make_dataloader` 使用 MosaicML 的 `StreamingDataLoader`，训练检查点应同时保存其 `state_dict()`；恢复时调用 `load_state_dict()`。DataLoader 与 StreamingDataset 使用相同的每卡 batch size。
 
-## 空间 MAE 基线训练
+## 原有空间 MAE 配置与旧检查点
 
 `src/cellvit/models/mae.py` 是从零初始化的 ViT Small/16 编码器和轻量解码器。训练时随机遮住 75% 的空间 patch，编码器只处理其余 patch，解码器重建被遮住的像素。每个 patch 内按通道标准化重建目标，再对被遮住的位置求平均损失。推理时只用编码器，将所有 patch token 平均池化成一个孔位向量。默认架构见 [configs/mae_small.json](configs/mae_small.json)。
 
@@ -118,14 +164,14 @@ cellvit-train --mds-root /path/to/rxrx3_mds --output /path/to/runs/mae_smoke \
 
 ### 多轮正式训练
 
-`scripts/train_mae.sh` 从头启动多轮训练，默认 20 个 epoch、batch size 2、梯度累积 32。修改脚本顶部的 MDS 路径和新输出目录后，在项目根目录执行：
+保留原 16×16 配置的 `scripts/train_mae.sh` 从头启动多轮训练，当前脚本为 50 个 epoch、batch size 2、梯度累积 32；新的四组 8×8 对照使用上面的 `scripts/train_comparison.sh`。修改原脚本顶部的 MDS 路径和新输出目录后，在项目根目录执行：
 
 ```bash
 conda activate cellvit
 bash scripts/train_mae.sh
 ```
 
-每轮自动完整验证并保存最佳重建模型。20 轮是起始实验预算，是否训练充分应根据验证 MSE 和相对重建评分的趋势判断；当前不自动早停。中断时在训练命令末尾追加 `--resume "$RUN_DIR/latest.pt"`，总轮数及其余训练参数保持不变。之前 1 轮测试任务的 checkpoint 不能直接改为 20 轮续训。
+每轮自动完整验证并保存最佳重建模型。50 轮是实验预算，是否训练充分应根据验证 MSE 和表征指标的趋势判断；当前不自动早停。中断时在训练命令末尾追加 `--resume "$RUN_DIR/latest.pt"`，总轮数及其余训练参数保持不变。之前 1 轮测试任务的 checkpoint 不能直接改为 50 轮续训。
 
 ### 续训和评估脚本
 

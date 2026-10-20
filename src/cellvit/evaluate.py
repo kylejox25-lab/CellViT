@@ -14,7 +14,7 @@ from pathlib import Path
 
 import torch
 
-from cellvit.models import MAEConfig, MaskedAutoencoder
+from cellvit.models import MaskedAutoencoder, model_from_checkpoint
 
 
 class ReconstructionMetrics:
@@ -24,22 +24,31 @@ class ReconstructionMetrics:
         self.squared_error: torch.Tensor | None = None
         self.zero_error: torch.Tensor | None = None
         self.masked_patches: torch.Tensor | None = None
+        self.mask_layout: str | None = None
 
     @torch.no_grad()
     def update(self, prediction: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -> None:
         prediction = prediction.float().reshape_as(target)
-        if mask.shape != target.shape[:2]:
+        if mask.shape == target.shape[:2]:
+            layout = "spatial_patch"
+            hidden = mask.bool().unsqueeze(-1).expand_as(target[..., 0])
+        elif mask.shape == target.shape[:3]:
+            layout = "channel_patch"
+            hidden = mask.bool()
+        else:
             raise ValueError("Mask and target patch dimensions do not match")
+        if self.mask_layout is not None and self.mask_layout != layout:
+            raise ValueError("Cannot mix spatial and channel-patch mask layouts")
+        self.mask_layout = layout
         finite = torch.isfinite(prediction).all() & torch.isfinite(target).all()
         if not bool(finite):
             raise FloatingPointError("Non-finite reconstruction prediction or target")
-        hidden = mask.bool()
         # Dense reductions avoid dynamic boolean indexing and its GPU syncs.
         error = (prediction - target).square().mean(dim=-1)
         baseline = target.square().mean(dim=-1)
-        error = torch.where(hidden.unsqueeze(-1), error, 0).sum(dim=(0, 1), dtype=torch.float64)
-        baseline = torch.where(hidden.unsqueeze(-1), baseline, 0).sum(dim=(0, 1), dtype=torch.float64)
-        count = hidden.sum()
+        error = torch.where(hidden, error, 0).sum(dim=(0, 1), dtype=torch.float64)
+        baseline = torch.where(hidden, baseline, 0).sum(dim=(0, 1), dtype=torch.float64)
+        count = hidden.sum(dim=(0, 1))
         if self.squared_error is None:
             self.squared_error, self.zero_error = error, baseline
             self.masked_patches = count
@@ -49,13 +58,15 @@ class ReconstructionMetrics:
             self.masked_patches += count
 
     def compute(self) -> dict:
-        count = 0 if self.masked_patches is None else int(self.masked_patches)
-        if not count:
+        if self.masked_patches is None or not int(self.masked_patches.sum()):
             raise ValueError("No masked patches were evaluated")
         # Only copy accumulated channel totals when reporting, not every batch.
-        channel_mse = self.squared_error.cpu() / count
-        channel_baseline = self.zero_error.cpu() / count
-        mse, baseline = float(channel_mse.mean()), float(channel_baseline.mean())
+        counts = self.masked_patches.cpu()
+        errors, zero_errors = self.squared_error.cpu(), self.zero_error.cpu()
+        channel_mse = [float(error / count) if count else None for error, count in zip(errors, counts)]
+        channel_baseline = [float(error / count) if count else None for error, count in zip(zero_errors, counts)]
+        mse = float(errors.sum() / counts.sum())
+        baseline = float(zero_errors.sum() / counts.sum())
         if not math.isfinite(mse) or not math.isfinite(baseline):
             raise FloatingPointError("Non-finite reconstruction error")
 
@@ -68,11 +79,14 @@ class ReconstructionMetrics:
             "masked_rmse": math.sqrt(mse),
             "zero_baseline_mse": baseline,
             "reconstruction_skill": skill(mse, baseline),
-            "masked_patches": count,
-            "per_channel_mse": channel_mse.tolist(),
-            "per_channel_zero_baseline_mse": channel_baseline.tolist(),
+            "masked_patches": int(counts[0] if self.mask_layout == "spatial_patch" else counts.sum()),
+            "mask_unit": self.mask_layout,
+            "per_channel_masked_patches": counts.tolist(),
+            "per_channel_mse": channel_mse,
+            "per_channel_zero_baseline_mse": channel_baseline,
             "per_channel_reconstruction_skill": [
-                skill(error, zero) for error, zero in zip(channel_mse.tolist(), channel_baseline.tolist())
+                skill(error, zero) if error is not None else None
+                for error, zero in zip(channel_mse, channel_baseline)
             ],
         }
         return result
@@ -88,6 +102,7 @@ def evaluate_reconstruction(
     amp: bool = False,
     max_batches: int | None = None,
     log_every: int = 50,
+    diffusion_sampling_steps: int = 0,
 ) -> dict:
     """Fixed masks given the same seed, loader order, and batch size.
 
@@ -98,6 +113,11 @@ def evaluate_reconstruction(
         raise ValueError("max_batches must be positive")
     if log_every < 0:
         raise ValueError("log_every must be nonnegative (0 disables progress)")
+    if diffusion_sampling_steps < 0:
+        raise ValueError("diffusion_sampling_steps must be nonnegative")
+    is_diffusion = model.config.model_type == "diffmae"
+    if is_diffusion and diffusion_sampling_steps > model.config.diffusion_steps:
+        raise ValueError("Sampling steps cannot exceed diffusion_steps")
     model.eval()
     metrics = ReconstructionMetrics()
     wells = batches = 0
@@ -124,7 +144,9 @@ def evaluate_reconstruction(
         seen.update(ids)
         generator = torch.Generator(device=device).manual_seed(seed + index)
         with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=use_amp):
-            result = model(image, generator=generator)
+            result = (model.reconstruct(image, generator=generator, sampling_steps=diffusion_sampling_steps)
+                      if is_diffusion and diffusion_sampling_steps
+                      else model(image, generator=generator))
         metrics.update(result["prediction"], result["target"], result["mask"])
         wells += len(image)
         batches += 1
@@ -155,6 +177,12 @@ def evaluate_reconstruction(
         "mask_ratio": model.config.mask_ratio,
         "target_space": "patch_channel_standardized" if model.config.norm_pix_loss else "raw_0_1",
         "precision": "amp_fp16" if use_amp else "fp32",
+        "model_type": model.config.model_type,
+        "reconstruction_protocol": (
+            f"diffmae_ddim_{diffusion_sampling_steps}" if is_diffusion and diffusion_sampling_steps
+            else "diffmae_sampled_t_denoising" if is_diffusion
+            else "masked_reconstruction"
+        ),
     }
 
 
@@ -172,6 +200,8 @@ def main() -> None:
     parser.add_argument("--max-batches", type=int, help="Optional partial evaluation")
     parser.add_argument("--log-every", type=int, default=50, help="Progress interval; 0 disables progress")
     parser.add_argument("--no-amp", action="store_true", help="Use FP32 instead of checkpoint precision")
+    parser.add_argument("--diffusion-sampling-steps", type=int, default=0,
+                        help="DiffMAE DDIM steps; 0 evaluates its sampled-t training objective")
     args = parser.parse_args()
     root, destination = args.mds_root.resolve(), args.output.resolve()
     if destination == root or root in destination.parents:
@@ -189,8 +219,6 @@ def main() -> None:
         print(f"Loading checkpoint: {args.checkpoint}", file=sys.stderr, flush=True)
     # Load only trusted checkpoints produced by this project.
     state = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
-    if state.get("format") != "cellvit-spatial-mae-v1":
-        raise ValueError("Not a CellViT spatial MAE checkpoint")
     if state["manifest_sha256"] != hashlib.sha256(manifest_bytes).hexdigest():
         raise ValueError("Dataset manifest differs from the training checkpoint")
     batch_size = args.batch_size if args.batch_size is not None else state["run_config"]["batch_size"]
@@ -198,8 +226,7 @@ def main() -> None:
     if batch_size < 1 or args.num_workers < 0:
         raise ValueError("Invalid batch size or worker count")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = MaskedAutoencoder(MAEConfig(**state["model_config"]))
-    model.load_state_dict(state["model"])
+    model = model_from_checkpoint(state)
     model.to(device)
     if args.log_every:
         print(f"Preparing {args.split} loader with {args.num_workers} workers", file=sys.stderr, flush=True)
@@ -210,6 +237,7 @@ def main() -> None:
     report = evaluate_reconstruction(
         model, loader, device, seed=seed, amp=state["run_config"]["amp"] and not args.no_amp,
         max_batches=args.max_batches, log_every=args.log_every,
+        diffusion_sampling_steps=args.diffusion_sampling_steps,
     )
     expected = manifest["counts"][args.split]
     if args.max_batches is None and report["wells"] != expected:

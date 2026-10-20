@@ -27,6 +27,8 @@ class MAEConfig:
     mlp_ratio: float = 4.0
     mask_ratio: float = 0.75
     norm_pix_loss: bool = True
+    model_type: str = "mae"
+    diffusion_steps: int = 1000
 
     def __post_init__(self) -> None:
         if self.image_size < 1 or self.patch_size < 1 or self.image_size % self.patch_size:
@@ -43,8 +45,12 @@ class MAEConfig:
                 raise ValueError("transformer dimensions must be positive and divisible by heads")
         if self.mlp_ratio <= 0:
             raise ValueError("mlp_ratio must be positive")
+        if self.model_type not in {"mae", "ca_mae", "diffmae", "cnn_mae"}:
+            raise ValueError("model_type must be mae, ca_mae, diffmae, or cnn_mae")
+        if self.diffusion_steps < 2:
+            raise ValueError("diffusion_steps must be at least two")
 
-    def to_dict(self) -> dict[str, int | float | bool]:
+    def to_dict(self) -> dict[str, int | float | bool | str]:
         return asdict(self)
 
 

@@ -13,7 +13,7 @@ import pyarrow.parquet as pq
 import torch
 
 from cellvit.data.streaming_dataset import make_dataloader
-from cellvit.models import MAEConfig, MaskedAutoencoder
+from cellvit.models import model_from_checkpoint
 
 
 def export_embeddings(
@@ -47,13 +47,10 @@ def export_embeddings(
         raise ValueError(f"No wells in split {split}")
 
     state = torch.load(checkpoint, map_location="cpu", weights_only=False)
-    if state.get("format") != "cellvit-spatial-mae-v1":
-        raise ValueError("Not a CellViT spatial MAE checkpoint")
     if state["manifest_sha256"] != hashlib.sha256(manifest_bytes).hexdigest():
         raise ValueError("Checkpoint and MDS manifest do not match")
-    config = MAEConfig(**state["model_config"])
-    model = MaskedAutoencoder(config)
-    model.load_state_dict(state["model"])
+    model = model_from_checkpoint(state)
+    config = model.config
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     use_amp = state["run_config"]["amp"] and device.type == "cuda"
     model = model.to(device).eval()
@@ -64,7 +61,13 @@ def export_embeddings(
     schema = pa.schema([
         ("well_id", pa.string()),
         ("embedding", pa.list_(pa.float32(), config.encoder_dim)),
-    ])
+    ], metadata={
+        b"cellvit_model_type": config.model_type.encode(),
+        b"cellvit_pooling": b"mean",
+        b"cellvit_manifest_sha256": state["manifest_sha256"].encode(),
+        b"cellvit_split": split.encode(),
+        b"cellvit_checkpoint": str(checkpoint.resolve()).encode(),
+    })
     output.parent.mkdir(parents=True, exist_ok=True)
     seen: set[str] = set()
     with pq.ParquetWriter(temporary, schema=schema, compression="zstd") as writer:
